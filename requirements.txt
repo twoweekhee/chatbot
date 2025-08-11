@@ -1,0 +1,19 @@
+fastapi
+langchain
+langchain-openai
+langgraph
+python-dotenv
+pydantic
+uvicorn
+opencv-python
+python-multipart
+
+# vector db
+chromadb
+
+# ocr
+easyocr
+sentence-transformers
+
+# 말풍선 탐지기
+ultralytics

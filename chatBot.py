@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain.schema import HumanMessage, AIMessage
