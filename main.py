@@ -29,9 +29,10 @@ async def root():
 
 @app.post("/api/upload-multiple")
 async def upload_image_vector(files: List[UploadFile]):
+    print("요청이 시작했습니다.")
     for file in files:
-        imageUtils.ocr_with_yolo(file)
-        imageUtils.ocr_with_nothing(file)
+        await imageUtils.quick_improvement_ocr_mps(file)
+        await imageUtils.ocr_with_nothing(file)
 
 @app.post("/hello")
 async def request_gpt(request_text: RequestText):

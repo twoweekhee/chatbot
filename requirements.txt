@@ -7,12 +7,16 @@ pydantic
 uvicorn
 opencv-python
 python-multipart
+easyocr==1.7.2
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+torch>=2.0.0
+torchvision>=0.15.0
 
 # vector db
 chromadb
 
 # ocr
-easyocr
 sentence-transformers
 
 # 말풍선 탐지기
