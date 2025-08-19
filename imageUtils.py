@@ -1,15 +1,13 @@
 import os
 import ssl
 from typing import Dict, Any
-import warnings
 
-import torch
+import io
 
 from PIL import Image
-import cv2
-import numpy as np
 from chromadb import Client, Settings
 from easyocr import easyocr
+import pytesseract
 from fastapi import UploadFile
 
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -20,161 +18,98 @@ chroma_client = Client(Settings(
 
 ocr_reader = easyocr.Reader(['ko', 'en'])
 
+# Tesseract 경로 설정 (Mac의 경우)
+import platform
+if platform.system() == 'Darwin':
+    # M1/M2 Mac
+    if os.path.exists('/opt/homebrew/bin/tesseract'):
+        pytesseract.pytesseract.tesseract_cmd = '/opt/homebrew/bin/tesseract'
+    # Intel Mac
+    elif os.path.exists('/usr/local/bin/tesseract'):
+        pytesseract.pytesseract.tesseract_cmd = '/usr/local/bin/tesseract'
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 output_dir = os.path.join(BASE_DIR, "detected_bubbles")
 
-async def ocr_with_nothing(file: UploadFile) -> Dict[str, Any]:
+
+async def ocr_with_tesseract(file: UploadFile) -> Dict[str, Any]:
     """
-    YOLO 없이 전체 이미지에서 바로 OCR 수행
+    YOLO 없이 전체 이미지에서 바로 OCR 수행 (Tesseract) - 문장 단위
     """
-    print("\n=== 전체 이미지 OCR 시작 ===")
-
-    await file.seek(0)
-
-    # 파일 읽기
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-
-    # 전체 이미지에서 바로 OCR
-    ocr_results = ocr_reader.readtext(img)
-
-    all_texts = []
-    for bbox, text, conf in ocr_results:
-        all_texts.append(text)
-        print(f"  '{text}' (신뢰도: {conf:.2f})")
-
-    print(f"\n총 추출된 텍스트: {len(all_texts)}개")
-
-    return {
-        "method": "Direct OCR",
-        "text_count": len(all_texts),
-        "texts": all_texts
-    }
-
-async def quick_improvement_ocr_mps(file: UploadFile) -> Dict[str, Any]:
-    """
-    Mac MPS(Metal Performance Shaders) 활용 버전 - 안전한 언패킹 적용
-    """
-    print("\n=== Mac MPS 최적화 OCR 시작 ===")
-
-    # 디바이스 설정
-    if torch.backends.mps.is_available():
-        device = 'mps'
-        print("MPS 디바이스 사용")
-    else:
-        device = 'cpu'
-        print("CPU 사용")
+    print("\n=== 전체 이미지 OCR 시작 (Tesseract) ===")
 
     await file.seek(0)
     contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # 전처리 (동일)
-    img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    # PIL Image로 변환
+    pil_image = Image.open(io.BytesIO(contents))
 
-    kernel = np.array([[0, -1, 0],
-                       [-1, 5, -1],
-                       [0, -1, 0]])
-    img = cv2.filter2D(img, -1, kernel)
+    if pil_image.mode != 'L':
+        pil_image = pil_image.convert('L')
 
-    if np.mean(img) < 127:
-        print("다크모드 감지 - 이미지 반전 적용")
-        img = cv2.bitwise_not(img)
+    custom_config = r'''
+        -l kor+eng 
+        --oem 3 
+        --psm 11 
+        -c preserve_interword_spaces=0
+        -c tosp_min_sane_kn_sp=0.5
+        '''
 
-    print("OCR 시작...")
+    # 방법 1: image_to_string으로 전체 텍스트 가져오기 (라인 단위)
+    full_text = pytesseract.image_to_string(
+        pil_image,
+        lang='kor+eng',
+        config=custom_config  # PSM 11: 희소 텍스트 (채팅에 적합)
+    )
 
-    # Reader 초기화 시 경고 무시
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    # 라인별로 분리 (빈 줄 제거)
+    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
 
-        # MPS 사용 시 gpu=True로 설정
-        reader = easyocr.Reader(
-            ['ko', 'en'],
-            gpu=(device == 'mps'),
-            verbose=False
-        )
+    # 방법 2: 상세 데이터로 라인별 그룹화
+    data = pytesseract.image_to_data(
+        pil_image,
+        lang='kor+eng',
+        output_type=pytesseract.Output.DICT,
+        config='--oem 3 --psm 11'
+    )
 
-    # readtext 호출 시에도 경고 무시
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    # 라인별로 텍스트 그룹화
+    line_dict = {}
+    for i in range(len(data['text'])):
+        if int(data['conf'][i]) > 30 and data['text'][i].strip():
+            # block_num과 line_num을 키로 사용
+            line_key = (data['block_num'][i], data['line_num'][i])
 
-        raw_results = reader.readtext(
-            img,
-            detail=1,
-            paragraph=True,
-            width_ths=0.7,
-            height_ths=0.2,
-            y_ths=0.5,
-            x_ths=1.0,
-            decoder='greedy',
-            beamWidth=5,
-            batch_size=1,
-            workers=0,  # Mac에서는 0 권장
-            allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz가-힣 .,!?-_()[]{}/@#$%&*+=":;'
-        )
+            if line_key not in line_dict:
+                line_dict[line_key] = {
+                    'words': [],
+                    'confidences': [],
+                    'top': data['top'][i]
+                }
 
-    # 안전한 언패킹 처리
-    results = []
-    for i, result in enumerate(raw_results):
-        try:
-            if isinstance(result, (list, tuple)):
-                if len(result) == 3:
-                    bbox, text, conf = result
-                elif len(result) == 2:
-                    bbox, text = result
-                    conf = 1.0  # 기본 confidence 값
-                    print(f"  [경고] {i}번째 결과에 confidence 누락, 기본값 1.0 사용")
-                else:
-                    print(f"  [경고] {i}번째 결과 형식 오류: 길이 {len(result)}")
-                    continue
+            line_dict[line_key]['words'].append(data['text'][i])
+            line_dict[line_key]['confidences'].append(int(data['conf'][i]))
 
-                results.append((bbox, text, conf))
-            else:
-                print(f"  [경고] {i}번째 결과 타입 오류: {type(result)}")
-                continue
+    # 라인별 텍스트 조합
+    grouped_texts = []
+    for line_key in sorted(line_dict.keys()):
+        line_data = line_dict[line_key]
+        # 단어들을 공백으로 연결
+        full_line = ' '.join(line_data['words'])
+        # 평균 신뢰도 계산
+        avg_conf = sum(line_data['confidences']) / len(line_data['confidences']) / 100
 
-        except Exception as e:
-            print(f"  [오류] {i}번째 결과 처리 실패: {e}")
-            print(f"    원본 데이터: {result}")
-            continue
+        grouped_texts.append({
+            'text': full_line,
+            'confidence': avg_conf
+        })
+        print(f"  '{full_line}' (신뢰도: {avg_conf:.2f})")
 
-    texts = []
-    confidences = []
-    excluded_texts = []
-
-    print("\n추출된 텍스트:")
-    for bbox, text, conf in results:
-        if conf > 0.5:
-            texts.append(text)
-            confidences.append(conf)
-            print(f"  '{text}' (신뢰도: {conf:.2f})")
-        else:
-            excluded_texts.append({'text': text, 'confidence': conf})
-            print(f"  [제외] '{text}' (신뢰도: {conf:.2f})")
-
-    # 통계 정보
-    avg_confidence = sum(confidences) / len(confidences) if confidences else 0
-
-    print(f"\n=== OCR 결과 요약 ===")
-    print(f"총 검출: {len(raw_results)}개")
-    print(f"정상 처리: {len(results)}개")
-    print(f"채택된 텍스트: {len(texts)}개")
-    print(f"제외된 텍스트: {len(excluded_texts)}개")
-    print(f"평균 신뢰도: {avg_confidence:.2f}")
+    print(f"\n총 추출된 텍스트: {len(grouped_texts)}개")
 
     return {
-        "method": "Quick Improvement (MPS)",
-        "text_count": len(texts),
-        "texts": texts,
-        "device": device,
-        "statistics": {
-            "total_detected": len(raw_results),
-            "successfully_processed": len(results),
-            "accepted_texts": len(texts),
-            "excluded_texts": len(excluded_texts),
-            "average_confidence": avg_confidence
-        },
-        "excluded": excluded_texts if excluded_texts else None
+        "method": "Direct OCR (Tesseract)",
+        "text_count": len(grouped_texts),
+        "texts": [item['text'] for item in grouped_texts],
+        "detailed_texts": grouped_texts
     }
