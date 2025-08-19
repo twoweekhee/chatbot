@@ -5,6 +5,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
+import imageCustom
 from chatBot import graph  # generate_response 대신 graph를 import 합니다.
 import imageUtils
 
@@ -31,7 +32,9 @@ async def root():
 async def upload_image_vector(files: List[UploadFile]):
     print("요청이 시작했습니다.")
     for file in files:
-        await imageUtils.ocr_with_tesseract(file)
+        await imageCustom.run_graph(file)
+        # await imageUtils.ocr_with_tesseract(file)
+        # await imageUtils.ocr_with_tesseract_grouped(file)
 
 @app.post("/hello")
 async def request_gpt(request_text: RequestText):
